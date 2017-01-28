@@ -50,8 +50,20 @@ struct st_co_routine_s {
     st_co_spec_t a_spec[1024];
 };
 
+typedef struct st_timeout_s st_timeout_t;
+typedef struct st_timeout_item_s st_timeout_item_t;
+
+st_timeout_t *alloc_timeout(size_t size);
+void free_timeout(st_timeout_t *ap_timeout);
+int add_timeout(st_timeout_t *ap_timeout, st_timeout_item_t *ap_item, uint64_t all_now);
+
+st_co_epoll_t * alloc_epoll();
+void free_epoll(st_co_epoll_t *ctx);
+
 void co_init_curr_thread_env();
 st_co_routine_env_t *co_get_curr_thread_env();
+void set_epoll(st_co_routine_env_t *env, st_co_epoll_t *ev);
+st_co_routine_t *get_curr_thread_co();
 
 void co_free(st_co_routine_t * co);
 void co_yield_env(st_co_routine_env_t *env);

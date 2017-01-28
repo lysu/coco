@@ -13,7 +13,7 @@ find_package(Threads REQUIRED)
 include_directories(include)
 
 set_source_files_properties(src/cc_ctx_swap.S PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp")
-set(DIR_SRCS src/cc_ctx.c src/cc_routine.c src/cc_ctx_swap.S)
+set(DIR_SRCS src/cc_ctx.c src/cc_routine.c src/cc_ctx_swap.S src/cc_epoll.c)
 
 set(LINK_LIBS dl)
 if(CMAKE_THREAD_LIBS_INIT)

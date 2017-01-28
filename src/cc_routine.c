@@ -1,8 +1,11 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <string.h>
-#include "../include/cc_routine.h"
+#include <sys/time.h>
+#include <errno.h>
+#include "cc_routine.h"
 #include "cc_routine_inner.h"
+#include "cc_epoll.h"
 
 extern void coctx_swap(coctx_t *,coctx_t*);
 
@@ -33,7 +36,20 @@ static inline pid_t get_pid() {
 
     }
     return tid;
+}
 
+static unsigned long long get_tick_ms() {
+#if defined( __LIBCO_RDTSCP__)
+    static uint32_t khz = getCpuKhz();
+	return counter() / khz;
+#else
+    struct timeval now = { 0 };
+    gettimeofday( &now,NULL );
+    unsigned long long u = (unsigned long long) now.tv_sec;
+    u *= 1000;
+    u += now.tv_usec / 1000;
+    return u;
+#endif
 }
 
 st_stack_mem_t *co_alloc_stackmem(size_t stack_size) {
@@ -52,6 +68,418 @@ static st_stack_mem_t *co_get_stackmem(st_share_stack_t *share_stack) {
     int idx = share_stack->alloc_idx % share_stack->count;
     share_stack->alloc_idx++;
     return share_stack->stack_array[idx];
+}
+
+#define EPOLL_SIZE 1024 * 10
+
+typedef struct st_timeout_item_link_s st_timeout_item_link_t;
+
+struct st_co_epoll_s {
+    int epoll_fd;
+    st_timeout_t *timeout;
+    st_timeout_item_link_t *timeout_list;
+    st_timeout_item_link_t *active_list;
+    struct co_epoll_res *result;
+};
+
+struct st_timeout_item_link_s {
+    st_timeout_item_t *head;
+    st_timeout_item_t *tail;
+};
+
+#define MAX_TIMEOUT  40 * 1000
+
+typedef void (*pfn_on_prepare_t)( st_timeout_item_t *,struct epoll_event *ev, st_timeout_item_link_t *active);
+typedef void (*pfn_on_process_t)( st_timeout_item_t *);
+
+#define TIMEOUT_ITEM_UNSET \
+    st_timeout_item_t *prev; \
+    st_timeout_item_t *next; \
+    st_timeout_item_link_t *link; \
+    unsigned long long expire_time; \
+    pfn_on_prepare_t pfn_prepare; \
+    pfn_on_process_t pfn_process; \
+    void *arg; \
+    int timeouted;
+
+struct st_timeout_item_s {
+    TIMEOUT_ITEM_UNSET
+};
+
+struct st_timeout_s {
+    st_timeout_item_link_t *items;
+    size_t item_size;
+
+    unsigned long long start;
+    long long start_idx;
+};
+
+void remove_from_link(st_timeout_item_t *ap) {
+    st_timeout_item_link_t *lst = ap->link;
+    if(!lst) return ;
+    assert( lst->head && lst->tail );
+
+    if(ap == lst->head) {
+        lst->head = ap->next;
+        if(lst->head) {
+            lst->head->prev = NULL;
+        }
+    } else {
+        if(ap->prev) {
+            ap->prev->next = ap->next;
+        }
+    }
+
+    if(ap == lst->tail) {
+        lst->tail = ap->prev;
+        if(lst->tail) {
+            lst->tail->next = NULL;
+        }
+    } else {
+        ap->next->prev = ap->prev;
+    }
+
+    ap->prev = ap->next = NULL;
+    ap->link = NULL;
+}
+
+void add_tail(st_timeout_item_link_t *ap_link, st_timeout_item_t *ap) {
+    if( ap->link ) {
+        return ;
+    }
+    if(ap_link->tail) {
+        ap_link->tail->next = ap;
+        ap->next = NULL;
+        ap->prev = ap_link->tail;
+        ap_link->tail = ap;
+    } else {
+        ap_link->head = ap_link->tail = ap;
+        ap->next = ap->prev = NULL;
+    }
+    ap->link = ap_link;
+}
+
+st_timeout_t *alloc_timeout(size_t size) {
+    st_timeout_t *lp = calloc(1, sizeof(st_timeout_t));
+    lp->item_size = size;
+    lp->items = calloc(lp->item_size, sizeof(st_timeout_item_link_t));
+    lp->start = get_tick_ms();
+    lp->start_idx = 0;
+    return lp;
+}
+
+void free_timeout(st_timeout_t *ap_timeout) {
+    free(ap_timeout->items);
+    free(ap_timeout);
+}
+
+int add_timeout(st_timeout_t *ap_timeout, st_timeout_item_t *ap_item, uint64_t all_now) {
+    if (ap_timeout->start == 0) {
+        ap_timeout->start = all_now;
+        ap_timeout->start_idx = 0;
+    }
+    if (all_now < ap_timeout->start) {
+        return __LINE__;
+    }
+    if (ap_item->expire_time < all_now) {
+        return __LINE__;
+    }
+    int diff = (int) (ap_item->expire_time - ap_timeout->start);
+    if (diff >= ap_timeout->item_size) {
+        return __LINE__;
+    }
+    add_tail(ap_timeout->items + ( ap_timeout->start_idx + diff ) % ap_timeout->item_size, ap_item);
+    return 0;
+}
+
+struct st_poll_item_s {
+    TIMEOUT_ITEM_UNSET
+    struct pollfd *self;
+    struct st_poll_s *poll;
+    struct epoll_event st_event;
+};
+typedef struct st_poll_item_s st_poll_item_t;
+
+struct st_poll_s {
+    TIMEOUT_ITEM_UNSET
+    struct pollfd *fds;
+    nfds_t nfds;
+    st_poll_item_t *poll_items;
+    int all_event_detach;
+    int epoll_fd;
+    int raise_cnt;
+};
+typedef struct st_poll_s st_poll_t;
+
+static uint32_t poll_event2epoll(short events) {
+    uint32_t e = 0;
+    if( events & POLLIN ) 	e |= EPOLLIN;
+    if( events & POLLOUT )  e |= EPOLLOUT;
+    if( events & POLLHUP ) 	e |= EPOLLHUP;
+    if( events & POLLERR )	e |= EPOLLERR;
+    if( events & POLLRDNORM ) e |= EPOLLRDNORM;
+    if( events & POLLWRNORM ) e |= EPOLLWRNORM;
+    return e;
+}
+
+static short epoll_event2poll(uint32_t events) {
+    short e = 0;
+    if( events & EPOLLIN ) 	e |= POLLIN;
+    if( events & EPOLLOUT ) e |= POLLOUT;
+    if( events & EPOLLHUP ) e |= POLLHUP;
+    if( events & EPOLLERR ) e |= POLLERR;
+    if( events & EPOLLRDNORM ) e |= POLLRDNORM;
+    if( events & EPOLLWRNORM ) e |= POLLWRNORM;
+    return e;
+}
+
+void on_poll_process_event(st_timeout_item_t * ap) {
+    st_co_routine_t *co = ap->arg;
+    co_resume( co );
+}
+
+void on_poll_prepare_pfn(st_timeout_item_t * ap, struct epoll_event *e, st_timeout_item_link_t *active) {
+    st_poll_item_t *lp = (st_poll_item_t *)ap;
+    lp->self->revents = epoll_event2poll(e->events);
+
+    st_poll_t *pPoll = lp->poll;
+    pPoll->raise_cnt++;
+
+    if(!pPoll->all_event_detach) {
+        pPoll->all_event_detach = 1;
+        st_timeout_item_t *t = (st_timeout_item_t *) pPoll;
+        remove_from_link(t);
+        add_tail(active, t );
+    }
+}
+
+st_co_routine_t *get_curr_co(st_co_routine_env_t *env) {
+    return env->call_stack[ env->call_stack_size - 1 ];
+}
+
+typedef int (*poll_pfn_t)(struct pollfd fds[], nfds_t nfds, int timeout);
+int co_poll_inner(st_co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout, poll_pfn_t pollfunc) {
+    if (timeout > MAX_TIMEOUT) {
+        timeout = MAX_TIMEOUT;
+    }
+    int epfd = ctx->epoll_fd;
+    st_co_routine_t *self = co_self();
+
+    st_poll_t *arg = calloc(1, sizeof(st_poll_t));
+    arg->epoll_fd = epfd;
+    arg->fds = calloc(nfds, sizeof(struct pollfd));
+    arg->nfds = nfds;
+
+    st_poll_item_t *arr = calloc(2, sizeof(st_poll_item_t));
+    if (nfds < sizeof(arr) / sizeof(arr[0]) && !self->is_share_stack) {
+        arg->poll_items = arr;
+    } else {
+        arg->poll_items = calloc(nfds, sizeof(st_poll_item_t));
+    }
+    arg->pfn_process = on_poll_process_event;
+    arg->arg = get_curr_co(co_get_curr_thread_env());
+
+    for(nfds_t i = 0; i < nfds; i++) {
+        arg->poll_items[i].self = arg->fds + i;
+        arg->poll_items[i].poll = arg;
+
+        arg->poll_items[i].pfn_prepare = on_poll_prepare_pfn;
+        struct epoll_event *ev = &arg->poll_items[i].st_event;
+
+        if(fds[i].fd > -1) {
+            ev->data.ptr = arg->poll_items + i;
+            ev->events = poll_event2epoll(fds[i].events);
+
+            int ret = co_epoll_ctl(epfd, EPOLL_CTL_ADD, fds[i].fd, ev);
+            if (ret < 0 && errno == EPERM && nfds == 1 && pollfunc != NULL) {
+                if( arg->poll_items != arr ) {
+                    free( arg->poll_items );
+                    arg->poll_items = NULL;
+                }
+                free(arg->fds);
+                free(arg);
+                return pollfunc(fds, nfds, timeout);
+            }
+        }
+    }
+
+    unsigned long long now = get_tick_ms();
+    arg->expire_time = now + timeout;
+    st_timeout_item_t *timeout_item = (st_timeout_item_t *) arg;
+    int ret = add_timeout(ctx->timeout, timeout_item, now);
+    if(ret != 0) {
+        errno = EINVAL;
+        if(arg->poll_items != arr) {
+            free( arg->poll_items );
+            arg->poll_items = NULL;
+        }
+        free(arg->fds);
+        free(arg);
+        return -__LINE__;
+    }
+
+    co_yield_env( co_get_curr_thread_env() );
+
+    remove_from_link(timeout_item);
+    for(nfds_t i = 0; i < nfds; i++) {
+        int fd = fds[i].fd;
+        if(fd > -1) {
+            co_epoll_ctl( epfd,EPOLL_CTL_DEL,fd,&arg->poll_items[i].st_event );
+        }
+        fds[i].revents = arg->fds[i].revents;
+    }
+
+    int raise_cnt = arg->raise_cnt;
+    if(arg->poll_items != arr) {
+        free( arg->poll_items );
+        arg->poll_items = NULL;
+    }
+
+    free(arg->fds);
+    free(arg);
+
+    return raise_cnt;
+}
+
+st_co_routine_t *get_curr_thread_co() {
+    st_co_routine_env_t *env = co_get_curr_thread_env();
+    if( !env ) return NULL;
+    return get_curr_co(env);
+}
+
+st_co_routine_t *co_self() {
+    return get_curr_thread_co();
+}
+
+int co_poll(st_co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout_ms) {
+    return co_poll_inner(ctx, fds, nfds, timeout_ms, NULL);
+}
+
+static inline void join(st_timeout_item_link_t* ap_link, st_timeout_item_link_t *ap_other) {
+    if( !ap_other->head ) {
+        return ;
+    }
+    st_timeout_item_t *lp = ap_other->head;
+    while(lp) {
+        lp->link = ap_link;
+        lp = lp->next;
+    }
+    lp = ap_other->head;
+    if(ap_link->tail) {
+        ap_link->tail->next = lp;
+        lp->prev = ap_link->tail;
+        ap_link->tail = ap_other->tail;
+    } else {
+        ap_link->head = ap_other->head;
+        ap_link->tail = ap_other->tail;
+    }
+
+    ap_other->head = ap_other->tail = NULL;
+}
+
+static inline void take_all_timeout(st_timeout_t *ap_timeout, unsigned long long all_now, st_timeout_item_link_t *ap_result) {
+    if (ap_timeout->start == 0) {
+        ap_timeout->start = all_now;
+        ap_timeout->start_idx = 0;
+    }
+    if (all_now < ap_timeout->start) {
+        return;
+    }
+    size_t cnt = (size_t) (all_now - ap_timeout->start + 1);
+    if (cnt > ap_timeout->item_size) {
+        cnt = ap_timeout->item_size;
+    }
+    if (cnt < 0) {
+        return;
+    }
+    for (int i = 0; i < cnt; ++i) {
+        int idx = (int) ((ap_timeout->start_idx + i) % ap_timeout->item_size);
+        join(ap_result, ap_timeout->items + idx);
+    }
+    ap_timeout->start = all_now;
+    ap_timeout->start_idx = (long long int) (cnt - 1);
+}
+
+static inline void pop_head(st_timeout_item_link_t *ap_link) {
+    if( !ap_link->head ) {
+        return ;
+    }
+    st_timeout_item_t *lp = ap_link->head;
+    if( ap_link->head == ap_link->tail ) {
+        ap_link->head = ap_link->tail = NULL;
+    } else {
+        ap_link->head = ap_link->head->next;
+    }
+
+    lp->prev = lp->next = NULL;
+    lp->link = NULL;
+
+    if( ap_link->head ) {
+        ap_link->head->prev = NULL;
+    }
+}
+
+void co_eventloop(st_co_epoll_t *ctx, pfn_co_eventloop_t pfn, void *arg) {
+    if (!ctx->result) {
+        ctx->result = co_epoll_res_alloc(EPOLL_SIZE);
+    }
+    struct co_epoll_res *result = ctx->result;
+
+    for (;;) {
+        int ret = co_epoll_wait(ctx->epoll_fd, result, EPOLL_SIZE, 1);
+
+        st_timeout_item_link_t *active = ctx->active_list;
+        st_timeout_item_link_t *timeout = ctx->timeout_list;
+
+        memset(timeout, 0, sizeof(st_timeout_item_link_t));
+
+        for (int i = 0; i < ret; ++i) {
+            st_timeout_item_t *item = result->events[i].data.ptr;
+            if (item->pfn_prepare) {
+                item->pfn_prepare(item, &result->events[i], active);
+            } else {
+                add_tail(active, item);
+            }
+        }
+
+        unsigned long long now = get_tick_ms();
+        take_all_timeout(ctx->timeout, now, timeout);
+
+        st_timeout_item_t *lp = timeout->head;
+        while (lp) {
+            lp->timeouted = 1;
+            lp = lp->next;
+        }
+
+        join(active, timeout);
+
+        lp = active->head;
+        while (lp) {
+            pop_head(active);
+            if (lp->pfn_process) {
+                lp->pfn_process(lp);
+            }
+            lp = active->head;
+        }
+        if (pfn) {
+            if (pfn(arg) == -1) {
+                break;
+            }
+        }
+    }
+}
+
+st_co_epoll_t * alloc_epoll() {
+    st_co_epoll_t *ctx = calloc(1, sizeof(st_co_epoll_t));
+    ctx->epoll_fd = 0;
+    ctx->timeout = alloc_timeout(60 * 1000);
+    ctx->timeout_list = calloc(1, sizeof(st_timeout_item_link_t));
+    ctx->active_list = calloc(1, sizeof(st_timeout_item_link_t));
+    return ctx;
+}
+
+void free_epoll(st_co_epoll_t *ctx) {
+
 }
 
 st_co_routine_t *co_create_env(st_co_routine_env_t *env, const st_co_routine_attr_t *attr,
@@ -114,10 +542,17 @@ void co_init_curr_thread_env() {
     coctx_init(&co_main->ctx);
 
     env->call_stack[env->call_stack_size++] = co_main;
+
+    st_co_epoll_t *ev = alloc_epoll();
+    set_epoll( env,ev );
 }
 
 st_co_routine_env_t *co_get_curr_thread_env() {
     return g_arr_co_env_per_thread[get_pid()];
+}
+
+void set_epoll(st_co_routine_env_t *env, st_co_epoll_t *ev) {
+    env->epoll = ev;
 }
 
 void save_stack_buffer(st_co_routine_t* ocupy_co) {
