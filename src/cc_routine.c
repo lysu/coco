@@ -5,7 +5,10 @@
 #include <errno.h>
 #include "cc_routine.h"
 #include "cc_routine_inner.h"
+#include "cc_routine_specific.h"
 #include "cc_epoll.h"
+#include "pthread.h"
+#include <stdio.h>
 
 extern void coctx_swap(coctx_t *,coctx_t*);
 
@@ -44,7 +47,7 @@ static unsigned long long get_tick_ms() {
 	return counter() / khz;
 #else
     struct timeval now = { 0 };
-    gettimeofday( &now,NULL );
+    gettimeofday(&now, NULL);
     unsigned long long u = (unsigned long long) now.tv_sec;
     u *= 1000;
     u += now.tv_usec / 1000;
@@ -114,7 +117,7 @@ struct st_timeout_s {
     long long start_idx;
 };
 
-void remove_from_link(st_timeout_item_t *ap) {
+void remove_from_timeout_link(st_timeout_item_t *ap) {
     st_timeout_item_link_t *lst = ap->link;
     if(!lst) return ;
     assert( lst->head && lst->tail );
@@ -143,7 +146,7 @@ void remove_from_link(st_timeout_item_t *ap) {
     ap->link = NULL;
 }
 
-void add_tail(st_timeout_item_link_t *ap_link, st_timeout_item_t *ap) {
+void add_timeout_tail(st_timeout_item_link_t *ap_link, st_timeout_item_t *ap) {
     if( ap->link ) {
         return ;
     }
@@ -188,7 +191,8 @@ int add_timeout(st_timeout_t *ap_timeout, st_timeout_item_t *ap_item, uint64_t a
     if (diff >= ap_timeout->item_size) {
         return __LINE__;
     }
-    add_tail(ap_timeout->items + ( ap_timeout->start_idx + diff ) % ap_timeout->item_size, ap_item);
+    size_t slot = (ap_timeout->start_idx + diff) % ap_timeout->item_size;
+    add_timeout_tail(ap_timeout->items + slot, ap_item);
     return 0;
 }
 
@@ -248,8 +252,8 @@ void on_poll_prepare_pfn(st_timeout_item_t * ap, struct epoll_event *e, st_timeo
     if(!pPoll->all_event_detach) {
         pPoll->all_event_detach = 1;
         st_timeout_item_t *t = (st_timeout_item_t *) pPoll;
-        remove_from_link(t);
-        add_tail(active, t );
+        remove_from_timeout_link(t);
+        add_timeout_tail(active, t);
     }
 }
 
@@ -320,11 +324,11 @@ int co_poll_inner(st_co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int time
 
     co_yield_env( co_get_curr_thread_env() );
 
-    remove_from_link(timeout_item);
+    remove_from_timeout_link(timeout_item);
     for(nfds_t i = 0; i < nfds; i++) {
         int fd = fds[i].fd;
         if(fd > -1) {
-            co_epoll_ctl( epfd,EPOLL_CTL_DEL,fd,&arg->poll_items[i].st_event );
+            co_epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &arg->poll_items[i].st_event);
         }
         fds[i].revents = arg->fds[i].revents;
     }
@@ -350,6 +354,21 @@ st_co_routine_t *get_curr_thread_co() {
 st_co_routine_t *co_self() {
     return get_curr_thread_co();
 }
+
+struct st_co_cond_t;
+
+struct st_co_cond_item_t {
+    struct st_co_cond_item_t *prev;
+    struct st_co_cond_item_t *next;
+    struct st_co_cond_t *link;
+
+    st_timeout_item_t timeout;
+};
+
+struct st_co_cond_t {
+    struct st_co_cond_item_t *head;
+    struct st_co_cond_item_t *tail;
+};
 
 int co_poll(st_co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout_ms) {
     return co_poll_inner(ctx, fds, nfds, timeout_ms, NULL);
@@ -397,15 +416,15 @@ static inline void take_all_timeout(st_timeout_t *ap_timeout, unsigned long long
         join(ap_result, ap_timeout->items + idx);
     }
     ap_timeout->start = all_now;
-    ap_timeout->start_idx = (long long int) (cnt - 1);
+    ap_timeout->start_idx += (long long int) (cnt - 1);
 }
 
-static inline void pop_head(st_timeout_item_link_t *ap_link) {
-    if( !ap_link->head ) {
+static inline void pop_head_timeout(st_timeout_item_link_t *ap_link) {
+    if(!ap_link->head) {
         return ;
     }
     st_timeout_item_t *lp = ap_link->head;
-    if( ap_link->head == ap_link->tail ) {
+    if(ap_link->head == ap_link->tail) {
         ap_link->head = ap_link->tail = NULL;
     } else {
         ap_link->head = ap_link->head->next;
@@ -414,7 +433,7 @@ static inline void pop_head(st_timeout_item_link_t *ap_link) {
     lp->prev = lp->next = NULL;
     lp->link = NULL;
 
-    if( ap_link->head ) {
+    if(ap_link->head) {
         ap_link->head->prev = NULL;
     }
 }
@@ -438,7 +457,7 @@ void co_eventloop(st_co_epoll_t *ctx, pfn_co_eventloop_t pfn, void *arg) {
             if (item->pfn_prepare) {
                 item->pfn_prepare(item, &result->events[i], active);
             } else {
-                add_tail(active, item);
+                add_timeout_tail(active, item);
             }
         }
 
@@ -455,7 +474,7 @@ void co_eventloop(st_co_epoll_t *ctx, pfn_co_eventloop_t pfn, void *arg) {
 
         lp = active->head;
         while (lp) {
-            pop_head(active);
+            pop_head_timeout(active);
             if (lp->pfn_process) {
                 lp->pfn_process(lp);
             }
@@ -642,6 +661,176 @@ void co_resume(st_co_routine_t *co) {
     }
     env->call_stack[env->call_stack_size++] = co;
     co_swap(curr_routine, co);
+}
+
+int co_is_enable_sys_hook() {
+    st_co_routine_t *co = get_curr_thread_co();
+    return (co && co->enable_sys_hook);
+}
+
+void co_disable_hook_sys() {
+    st_co_routine_t *co = get_curr_thread_co();
+    if(co) {
+        co->enable_sys_hook = 0;
+    }
+}
+
+void *co_getspecific(pthread_key_t key) {
+    st_co_routine_t *co = get_curr_thread_co();
+    if(!co || co->is_main) {
+        return pthread_getspecific( key );
+    }
+    return co->a_spec[key].value;
+}
+
+int co_setspecific(pthread_key_t key, const void *value) {
+    st_co_routine_t *co = get_curr_thread_co();
+    if(!co || co->is_main) {
+        return pthread_setspecific( key,value );
+    }
+    co->a_spec[key].value = (void*)value;
+    return 0;
+}
+
+st_co_epoll_t *co_get_epoll_ct() {
+    if(!co_get_curr_thread_env()) {
+        co_init_curr_thread_env();
+    }
+    return co_get_curr_thread_env()->epoll;
+}
+
+
+static void on_signal_process_event(st_timeout_item_t * ap ) {
+    st_co_routine_t *co = ap->arg;
+    co_resume(co);
+}
+
+struct st_co_cond_item_t *co_cond_pop(struct st_co_cond_t *link);
+int co_cond_signal(struct st_co_cond_t *si) {
+    struct st_co_cond_item_t * sp = co_cond_pop(si);
+    if(!sp) {
+        return 0;
+    }
+    remove_from_timeout_link(&sp->timeout);
+    add_timeout_tail(co_get_curr_thread_env()->epoll->active_list, &sp->timeout);
+    return 0;
+}
+
+int co_cond_broadcast(struct st_co_cond_t *si) {
+    for(;;) {
+        struct st_co_cond_item_t * sp = co_cond_pop( si );
+        if( !sp ) return 0;
+        remove_from_timeout_link(&sp->timeout);
+        add_timeout_tail(co_get_curr_thread_env()->epoll->active_list, &sp->timeout);
+    }
+    return 0;
+}
+
+static inline void pop_head_cond(struct st_co_cond_t *ap_link) {
+    if( !ap_link->head ) {
+        return ;
+    }
+    struct st_co_cond_item_t *lp = ap_link->head;
+    if( ap_link->head == ap_link->tail ) {
+        ap_link->head = ap_link->tail = NULL;
+    } else {
+        ap_link->head = ap_link->head->next;
+    }
+
+    lp->prev = lp->next = NULL;
+    lp->link = NULL;
+
+    if( ap_link->head ) {
+        ap_link->head->prev = NULL;
+    }
+}
+
+void add_cond_tail(struct st_co_cond_t *ap_link, struct st_co_cond_item_t *ap) {
+    if( ap->link ) {
+        return ;
+    }
+    if(ap_link->tail) {
+        ap_link->tail->next = ap;
+        ap->next = NULL;
+        ap->prev = ap_link->tail;
+        ap_link->tail = ap;
+    } else {
+        ap_link->head = ap_link->tail = ap;
+        ap->next = ap->prev = NULL;
+    }
+    ap->link = ap_link;
+}
+
+
+void remove_from_cond_link(struct st_co_cond_item_t *ap) {
+    struct st_co_cond_t *lst = ap->link;
+    if(!lst) return ;
+    assert( lst->head && lst->tail );
+
+    if(ap == lst->head) {
+        lst->head = ap->next;
+        if(lst->head) {
+            lst->head->prev = NULL;
+        }
+    } else {
+        if(ap->prev) {
+            ap->prev->next = ap->next;
+        }
+    }
+
+    if(ap == lst->tail) {
+        lst->tail = ap->prev;
+        if(lst->tail) {
+            lst->tail->next = NULL;
+        }
+    } else {
+        ap->next->prev = ap->prev;
+    }
+
+    ap->prev = ap->next = NULL;
+    ap->link = NULL;
+}
+
+int co_cond_timedwait(struct st_co_cond_t *link,int ms ) {
+    struct st_co_cond_item_t* psi = calloc(1, sizeof(struct st_co_cond_item_t));
+    psi->timeout.arg = get_curr_thread_co();
+    psi->timeout.pfn_process = on_signal_process_event;
+
+    if(ms > 0) {
+        unsigned long long now = get_tick_ms();
+        psi->timeout.expire_time = now + ms;
+
+        int ret = add_timeout(co_get_curr_thread_env()->epoll->timeout, &psi->timeout, now);
+        if( ret != 0 ) {
+            free(psi);
+            return ret;
+        }
+    }
+    add_cond_tail(link, psi);
+
+    co_yield_ct();
+
+    remove_from_cond_link(psi);
+    free(psi);
+
+    return 0;
+}
+
+struct st_co_cond_t *co_cond_alloc() {
+    return calloc(1, sizeof(struct st_co_cond_t));
+}
+
+int co_cond_free(struct st_co_cond_t * cc) {
+    free( cc );
+    return 0;
+}
+
+struct st_co_cond_item_t *co_cond_pop(struct st_co_cond_t *link ) {
+    struct st_co_cond_item_t *p = link->head;
+    if(p) {
+        pop_head_cond(link);
+    }
+    return p;
 }
 
 

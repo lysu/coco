@@ -35,4 +35,20 @@ st_co_routine_t *co_self();
 int co_poll(st_co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout_ms);
 void co_eventloop(st_co_epoll_t *ct, pfn_co_eventloop_t pfn, void *arg);
 
+void init_hook_sys_call();
+void co_enable_hook_sys();
+void co_disable_hook_sys();
+int co_is_enable_sys_hook();
+
+struct st_co_cond_t;
+
+struct st_co_cond_t *co_cond_alloc();
+int co_cond_free(struct st_co_cond_t *cc);
+
+int co_cond_signal(struct st_co_cond_t *);
+int co_cond_broadcast(struct st_co_cond_t *);
+int co_cond_timedwait(struct st_co_cond_t *,int timeout_ms);
+
+st_co_epoll_t *co_get_epoll_ct();
+
 #endif //LIBCOCO_CC_ROUTINE_H
