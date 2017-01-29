@@ -6,23 +6,23 @@
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-noreturn"
-struct st_task_t {
-    STAILQ_ENTRY(st_task_t) c_tqe;
+struct task_s {
+    STAILQ_ENTRY(task_s) c_tqe;
     int id;
 };
-STAILQ_HEAD(_task_q, st_task_t);
+STAILQ_HEAD(_task_q, task_s);
 
-struct st_env_t {
-    struct st_co_cond_t* cond;
+struct env_s {
+    struct co_cond_s* cond;
     struct _task_q task_queue;
 };
 
 void* producer(void *args) {
     co_enable_hook_sys();
-    struct st_env_t* env= args;
+    struct env_s* env= args;
     int id = 0;
     while (1) {
-        struct st_task_t* task = calloc(1, sizeof(struct st_task_t));
+        struct task_s* task = calloc(1, sizeof(struct task_s));
         task->id = id++;
         STAILQ_INSERT_TAIL(&env->task_queue, task, c_tqe);
         printf("%s:%d produce task %d\n", __func__, __LINE__, task->id);
@@ -34,14 +34,14 @@ void* producer(void *args) {
 
 void* consumer(void *args) {
     co_enable_hook_sys();
-    struct st_env_t* env = args;
+    struct env_s* env = args;
     while (1) {
         if (STAILQ_EMPTY(&env->task_queue)) {
             co_cond_timedwait(env->cond, -1);
             continue;
         }
-        struct st_task_t* task = STAILQ_FIRST(&env->task_queue);
-        STAILQ_REMOVE(&env->task_queue, task, st_task_t, c_tqe);
+        struct task_s* task = STAILQ_FIRST(&env->task_queue);
+        STAILQ_REMOVE(&env->task_queue, task, task_s, c_tqe);
         printf("%s:%d consume task %d\n", __func__, __LINE__, task->id);
         free(task);
     }
@@ -52,15 +52,15 @@ int main() {
 
     init_hook_sys_call();
 
-    struct st_env_t* env = calloc(1, sizeof(struct st_env_t));
+    struct env_s* env = calloc(1, sizeof(struct env_s));
     STAILQ_INIT(&env->task_queue);
     env->cond = co_cond_alloc();
 
-    st_co_routine_t* consumer_routine;
+    co_routine_t* consumer_routine;
     co_create(&consumer_routine, NULL, consumer, env);
     co_resume(consumer_routine);
 
-    st_co_routine_t* producer_routine;
+    co_routine_t* producer_routine;
     co_create(&producer_routine, NULL, producer, env);
     co_resume(producer_routine);
 

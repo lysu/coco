@@ -33,7 +33,7 @@ void co_epoll_res_free(struct co_epoll_res *ptr) {
 	if(ptr->events) {
 	    free(ptr->events);
     }
-	free( ptr );
+	free(ptr);
 }
 
 #else
@@ -41,7 +41,7 @@ void co_epoll_res_free(struct co_epoll_res *ptr) {
 #define ROW_SIZE 1024
 #define COL_SIZE 1024
 
-struct cls_fd_map { // million of fd , 1024 * 1024
+struct fd_map { // million of fd , 1024 * 1024
     void **m_pp[ 1024 ];
 };
 
@@ -97,76 +97,76 @@ int co_epoll_wait(int epfd, struct co_epoll_res *events, int maxevents, int time
     return j;
 }
 
-struct cls_fd_map *cls_fd_map_new() {
-    return calloc(1, sizeof(struct cls_fd_map));
+struct fd_map *fd_map_new() {
+    return calloc(1, sizeof(struct fd_map));
 }
 
-void cls_fd_map_destroy(struct cls_fd_map *cls) {
-    for(int i = 0; i < sizeof(cls->m_pp) / sizeof(cls->m_pp[0]); i++) {
-        if(cls->m_pp[i]) {
-            free(cls->m_pp[i]);
-            cls->m_pp[i] = NULL;
+void fd_map_destroy(struct fd_map *fdmap) {
+    for(int i = 0; i < sizeof(fdmap->m_pp) / sizeof(fdmap->m_pp[0]); i++) {
+        if(fdmap->m_pp[i]) {
+            free(fdmap->m_pp[i]);
+            fdmap->m_pp[i] = NULL;
         }
     }
 }
 
-int cls_fd_map_set(struct cls_fd_map *cls, int fd, const void * ptr) {
+int fd_map_set(struct fd_map *fdmap, int fd, const void * ptr) {
     int idx = fd / ROW_SIZE;
-    if(idx < 0 || idx >= sizeof(cls->m_pp)/sizeof(cls->m_pp[0])) {
+    if(idx < 0 || idx >= sizeof(fdmap->m_pp)/sizeof(fdmap->m_pp[0])) {
         assert(__LINE__ == 0);
         return -__LINE__;
     }
-    if(!cls->m_pp[ idx ]) {
-        cls->m_pp[ idx ] = (void**)calloc( 1,sizeof(void*) * COL_SIZE );
+    if(!fdmap->m_pp[ idx ]) {
+        fdmap->m_pp[ idx ] = (void**)calloc(1, sizeof(void*) * COL_SIZE);
     }
-    cls->m_pp[idx][fd % COL_SIZE] = (void*)ptr;
+    fdmap->m_pp[idx][fd % COL_SIZE] = (void*)ptr;
     return 0;
 }
 
-int cls_fd_map_clear(struct cls_fd_map *cls, int fd) {
-    cls_fd_map_set(cls, fd, NULL);
+int fd_map_clear(struct fd_map *fdmap, int fd) {
+    fd_map_set(fdmap, fd, NULL);
     return 0;
 }
 
-void *cls_fd_map_get(struct cls_fd_map *cls, int fd) {
+void *fd_map_get(struct fd_map *fdmap, int fd) {
     int idx = fd / ROW_SIZE;
-    if(idx < 0 || idx >= sizeof(cls->m_pp)/sizeof(cls->m_pp[0])) {
+    if(idx < 0 || idx >= sizeof(fdmap->m_pp)/sizeof(fdmap->m_pp[0])) {
         return NULL;
     }
-    void **lp = cls->m_pp[idx];
+    void **lp = fdmap->m_pp[idx];
     if(!lp) return NULL;
 
     return lp[fd % COL_SIZE];
 }
 
-__thread struct cls_fd_map *s_fd_map = NULL;
+__thread struct fd_map *s_fd_map = NULL;
 
-static inline struct cls_fd_map *get_fd_map() {
+static inline struct fd_map *get_fd_map() {
     if(!s_fd_map) {
-        s_fd_map = cls_fd_map_new();
+        s_fd_map = fd_map_new();
     }
     return s_fd_map;
 }
 
 int co_epoll_del(int epfd, int fd) {
     struct timespec t = {0};
-    struct kevent_pair_t *ptr = cls_fd_map_get(get_fd_map(), fd);
+    struct kevent_pair_t *ptr = fd_map_get(get_fd_map(), fd);
     if(!ptr) return 0;
     if (EPOLLIN & ptr->events) {
         struct kevent kev = {0};
         kev.ident = (uintptr_t) fd;
         kev.filter = EVFILT_READ;
         kev.flags = EV_DELETE;
-        kevent( epfd,&kev,1, NULL,0,&t );
+        kevent(epfd, &kev, 1, NULL, 0, &t);
     }
     if (EPOLLOUT & ptr->events) {
         struct kevent kev = {0};
         kev.ident = (uintptr_t) fd;
         kev.filter = EVFILT_WRITE;
         kev.flags = EV_DELETE;
-        kevent( epfd,&kev,1, NULL,0,&t );
+        kevent(epfd, &kev, 1, NULL, 0, &t);
     }
-    cls_fd_map_clear(get_fd_map(), fd);
+    fd_map_clear(get_fd_map(), fd);
     free(ptr);
     return 0;
 }
@@ -179,18 +179,18 @@ int co_epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
     if (ev->events & ~flags) {
         return -1;
     }
-    if(EPOLL_CTL_ADD == op && cls_fd_map_get(get_fd_map(), fd)) {
+    if(EPOLL_CTL_ADD == op && fd_map_get(get_fd_map(), fd)) {
         errno = EEXIST;
         return -1;
-    } else if(EPOLL_CTL_MOD == op && !cls_fd_map_get(get_fd_map(), fd)) {
+    } else if(EPOLL_CTL_MOD == op && !fd_map_get(get_fd_map(), fd)) {
         errno = ENOENT;
         return -1;
     }
 
-    struct kevent_pair_t *ptr = cls_fd_map_get(get_fd_map(), fd );
+    struct kevent_pair_t *ptr = fd_map_get(get_fd_map(), fd );
     if(!ptr) {
         ptr = calloc(1,sizeof(struct kevent_pair_t));
-        cls_fd_map_set(get_fd_map(), fd, ptr);
+        fd_map_set(get_fd_map(), fd, ptr);
     }
 
     int ret = 0;
@@ -205,7 +205,7 @@ int co_epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
         if(ptr->events & EPOLLOUT) {
             struct kevent kev = {0};
             EV_SET(&kev, fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-            ret = kevent( epfd, &kev,1, NULL,0, &t );
+            ret = kevent(epfd, &kev, 1, NULL, 0, &t);
             // printf("delete write ret %d\n",ret );
         }
     }
@@ -221,12 +221,12 @@ int co_epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
             struct kevent kev = {0};
             EV_SET(&kev, fd, EVFILT_WRITE, EV_ADD, 0, 0, ptr);
             ret = kevent(epfd, &kev, 1, NULL, 0, &t);
-            if( ret ) break;
+            if(ret) break;
         }
     } while(0);
 
-    if( ret ) {
-        cls_fd_map_clear(get_fd_map(), fd);
+    if(ret) {
+        fd_map_clear(get_fd_map(), fd);
         free(ptr);
         return ret;
     }

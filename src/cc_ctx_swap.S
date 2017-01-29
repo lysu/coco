@@ -1,5 +1,5 @@
 .globl coctx_swap
-#if !defined( __APPLE__ )
+#if !defined(__APPLE__)
 .type  coctx_swap, @function
 #endif
 coctx_swap:

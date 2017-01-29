@@ -171,7 +171,7 @@ struct rpchook_connagent_head_t {
 }__attribute__((packed));
 
 
-#define HOOK_SYS_FUNC(name) if( !g_sys_##name##_func ) { g_sys_##name##_func = (name##_pfn_t)dlsym(RTLD_NEXT,#name); }
+#define HOOK_SYS_FUNC(name) if(!g_sys_##name##_func) { g_sys_##name##_func = (name##_pfn_t)dlsym(RTLD_NEXT,#name); }
 
 static inline ll64_t diff_ms(struct timeval *begin, struct timeval *end) {
     ll64_t u = (end->tv_sec - begin->tv_sec);
@@ -390,7 +390,7 @@ ssize_t sendto(int socket, const void *message, size_t length,
                socklen_t dest_len) {
     /*
         1.no enable sys call ? sys
-        2.( !lp || lp is non block ) ? sys
+        2.(!lp || lp is non block) ? sys
         3.try
         4.wait
         5.try
@@ -523,7 +523,7 @@ ssize_t recv(int socket, void *buffer, size_t length, int flags) {
 
 }
 
-extern int co_poll_inner(st_co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout, poll_pfn_t pollfunc);
+extern int co_poll_inner(co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout, poll_pfn_t pollfunc);
 
 int poll(struct pollfd fds[], nfds_t nfds, int timeout) {
 
@@ -632,37 +632,37 @@ int fcntl(int fildes, int cmd, ...) {
     return ret;
 }
 
-struct stCoSysEnv_t {
+struct co_sys_env_s {
     char *name;
     char *value;
 };
-struct stCoSysEnvArr_t {
-    struct stCoSysEnv_t *data;
+struct co_sys_env_arr_s {
+    struct co_sys_env_s *data;
     size_t cnt;
 };
 
-static struct stCoSysEnvArr_t *dup_co_sysenv_arr(struct stCoSysEnvArr_t *arr) {
-    struct stCoSysEnvArr_t *lp = calloc(sizeof(struct stCoSysEnvArr_t), 1);
+static struct co_sys_env_arr_s *dup_co_sysenv_arr(struct co_sys_env_arr_s *arr) {
+    struct co_sys_env_arr_s *lp = calloc(sizeof(struct co_sys_env_arr_s), 1);
     if (arr->cnt) {
-        lp->data = (struct stCoSysEnv_t *) calloc(sizeof(struct stCoSysEnv_t) * arr->cnt, 1);
+        lp->data = (struct co_sys_env_s *) calloc(sizeof(struct co_sys_env_s) * arr->cnt, 1);
         lp->cnt = arr->cnt;
-        memcpy(lp->data, arr->data, sizeof(struct stCoSysEnv_t) * arr->cnt);
+        memcpy(lp->data, arr->data, sizeof(struct co_sys_env_s) * arr->cnt);
     }
     return lp;
 }
 
 static int co_sysenv_comp(const void *a, const void *b) {
-    return strcmp(((struct stCoSysEnv_t *) a)->name, ((struct stCoSysEnv_t *) b)->name);
+    return strcmp(((struct co_sys_env_s *) a)->name, ((struct co_sys_env_s *) b)->name);
 }
 
-static struct stCoSysEnvArr_t g_co_sysenv = {0};
+static struct co_sys_env_arr_s g_co_sysenv = {0};
 
 
 void co_set_env_list(const char *name[], size_t cnt) {
     if (g_co_sysenv.data) {
         return;
     }
-    g_co_sysenv.data = calloc(1, sizeof(struct stCoSysEnv_t) * cnt);
+    g_co_sysenv.data = calloc(1, sizeof(struct co_sys_env_s) * cnt);
 
     for (size_t i = 0; i < cnt; i++) {
         if (name[i] && name[i][0]) {
@@ -670,9 +670,9 @@ void co_set_env_list(const char *name[], size_t cnt) {
         }
     }
     if (g_co_sysenv.cnt > 1) {
-        qsort(g_co_sysenv.data, g_co_sysenv.cnt, sizeof(struct stCoSysEnv_t), co_sysenv_comp);
-        struct stCoSysEnv_t *lp = g_co_sysenv.data;
-        struct stCoSysEnv_t *lq = g_co_sysenv.data + 1;
+        qsort(g_co_sysenv.data, g_co_sysenv.cnt, sizeof(struct co_sys_env_s), co_sysenv_comp);
+        struct co_sys_env_s *lp = g_co_sysenv.data;
+        struct co_sys_env_s *lq = g_co_sysenv.data + 1;
         for (size_t i = 1; i < g_co_sysenv.cnt; i++) {
             if (strcmp(lp->name, lq->name)) {
                 ++lp;
@@ -690,16 +690,16 @@ void co_set_env_list(const char *name[], size_t cnt) {
 int setenv(const char *n, const char *value, int overwrite) {
     HOOK_SYS_FUNC(setenv)
     if (co_is_enable_sys_hook() && g_co_sysenv.data) {
-        st_co_routine_t *self = co_self();
+        co_routine_t *self = co_self();
         if (self) {
             if (!self->pv_env) {
                 self->pv_env = dup_co_sysenv_arr(&g_co_sysenv);
             }
-            struct stCoSysEnvArr_t *arr = self->pv_env;
+            struct co_sys_env_arr_s *arr = self->pv_env;
 
-            struct stCoSysEnv_t name = {(char *) n, 0};
+            struct co_sys_env_s name = {(char *) n, 0};
 
-            struct stCoSysEnv_t *e = bsearch(&name, arr->data, arr->cnt, sizeof(name), co_sysenv_comp);
+            struct co_sys_env_s *e = bsearch(&name, arr->data, arr->cnt, sizeof(name), co_sysenv_comp);
 
             if (e) {
                 if (overwrite || !e->value) {
@@ -717,16 +717,16 @@ int setenv(const char *n, const char *value, int overwrite) {
 int unsetenv(const char *n) {
     HOOK_SYS_FUNC(unsetenv)
     if (co_is_enable_sys_hook() && g_co_sysenv.data) {
-        st_co_routine_t *self = co_self();
+        co_routine_t *self = co_self();
         if (self) {
             if (!self->pv_env) {
                 self->pv_env = dup_co_sysenv_arr(&g_co_sysenv);
             }
-            struct stCoSysEnvArr_t *arr = self->pv_env;
+            struct co_sys_env_arr_s *arr = self->pv_env;
 
-            struct stCoSysEnv_t name = {(char *) n, 0};
+            struct co_sys_env_s name = {(char *) n, 0};
 
-            struct stCoSysEnv_t *e = bsearch(&name, arr->data, arr->cnt, sizeof(name), co_sysenv_comp);
+            struct co_sys_env_s *e = bsearch(&name, arr->data, arr->cnt, sizeof(name), co_sysenv_comp);
 
             if (e) {
                 if (e->value) {
@@ -744,16 +744,16 @@ int unsetenv(const char *n) {
 char *getenv(const char *n) {
     HOOK_SYS_FUNC(getenv)
     if (co_is_enable_sys_hook() && g_co_sysenv.data) {
-        st_co_routine_t *self = co_self();
+        co_routine_t *self = co_self();
 
-        struct stCoSysEnv_t name = {(char *) n, 0};
+        struct co_sys_env_s name = {(char *) n, 0};
 
         if (!self->pv_env) {
             self->pv_env = dup_co_sysenv_arr(&g_co_sysenv);
         }
-        struct stCoSysEnvArr_t *arr = (struct stCoSysEnvArr_t *) (self->pv_env);
+        struct co_sys_env_arr_s *arr = (struct co_sys_env_arr_s *) (self->pv_env);
 
-        struct stCoSysEnv_t *e = bsearch(&name, arr->data, arr->cnt, sizeof(name), co_sysenv_comp);
+        struct co_sys_env_s *e = bsearch(&name, arr->data, arr->cnt, sizeof(name), co_sysenv_comp);
 
         if (e) {
             return e->value;
@@ -849,7 +849,7 @@ struct hostent *co_gethostbyname(const char *name)
 #endif
 
 void co_enable_hook_sys() { //这函数必须在这里,否则本文件会被忽略！！！
-    st_co_routine_t *co = get_curr_thread_co();
+    co_routine_t *co = get_curr_thread_co();
     if (co) {
         co->enable_sys_hook = 1;
     }
