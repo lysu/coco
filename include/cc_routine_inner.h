@@ -1,7 +1,7 @@
 #ifndef LIBCOCO_CC_ROUTINE_INNER_H
 #define LIBCOCO_CC_ROUTINE_INNER_H
 
-#include "../include/cc_routine.h"
+#include "cc_routine.h"
 #include "cc_ctx.h"
 
 typedef struct co_routine_env_s co_routine_env_t;
@@ -22,7 +22,7 @@ typedef struct stack_mem_s stack_mem_t;
 struct share_stack_s {
     unsigned int alloc_idx;
     size_t stack_size;
-    int count;
+    size_t count;
     stack_mem_t **stack_array;
 };
 typedef struct share_stack_s share_stack_t;
@@ -50,12 +50,12 @@ struct co_routine_s {
     co_spec_t a_spec[1024];
 };
 
-typedef struct timeout_s st_timeout_t;
+typedef struct timeout_s timeout_t;
 typedef struct timeout_item_s timeout_item_t;
 
-st_timeout_t *alloc_timeout(size_t size);
-void free_timeout(st_timeout_t *ap_timeout);
-int add_timeout(st_timeout_t *ap_timeout, timeout_item_t *ap_item, uint64_t all_now);
+timeout_t *alloc_timeout(size_t size);
+void free_timeout(timeout_t *ap_timeout);
+int add_timeout(timeout_t *ap_timeout, timeout_item_t *ap_item, uint64_t all_now);
 
 co_epoll_t * alloc_epoll();
 void free_epoll(co_epoll_t *ctx);

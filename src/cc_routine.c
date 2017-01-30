@@ -68,7 +68,7 @@ static stack_mem_t *co_get_stackmem(share_stack_t *share_stack) {
     if (!share_stack) {
         return NULL;
     }
-    int idx = share_stack->alloc_idx % share_stack->count;
+    int idx = (int) (share_stack->alloc_idx % share_stack->count);
     share_stack->alloc_idx++;
     return share_stack->stack_array[idx];
 }
@@ -79,7 +79,7 @@ typedef struct timeout_item_link_s timeout_item_link_t;
 
 struct co_epoll_s {
     int epoll_fd;
-    st_timeout_t *timeout;
+    timeout_t *timeout;
     timeout_item_link_t *timeout_list;
     timeout_item_link_t *active_list;
     struct co_epoll_res *result;
@@ -162,8 +162,8 @@ void add_timeout_tail(timeout_item_link_t *ap_link, timeout_item_t *ap) {
     ap->link = ap_link;
 }
 
-st_timeout_t *alloc_timeout(size_t size) {
-    st_timeout_t *lp = calloc(1, sizeof(st_timeout_t));
+timeout_t *alloc_timeout(size_t size) {
+    timeout_t *lp = calloc(1, sizeof(timeout_t));
     lp->item_size = size;
     lp->items = calloc(lp->item_size, sizeof(timeout_item_link_t));
     lp->start = get_tick_ms();
@@ -171,12 +171,12 @@ st_timeout_t *alloc_timeout(size_t size) {
     return lp;
 }
 
-void free_timeout(st_timeout_t *ap_timeout) {
+void free_timeout(timeout_t *ap_timeout) {
     free(ap_timeout->items);
     free(ap_timeout);
 }
 
-int add_timeout(st_timeout_t *ap_timeout, timeout_item_t *ap_item, uint64_t all_now) {
+int add_timeout(timeout_t *ap_timeout, timeout_item_t *ap_item, uint64_t all_now) {
     if (ap_timeout->start == 0) {
         ap_timeout->start = all_now;
         ap_timeout->start_idx = 0;
@@ -200,7 +200,7 @@ struct poll_item_s {
     TIMEOUT_ITEM_UNSET
     struct pollfd *self;
     struct poll_s *poll;
-    struct epoll_event st_event;
+    struct epoll_event event;
 };
 typedef struct poll_item_s poll_item_t;
 
@@ -274,7 +274,7 @@ int co_poll_inner(co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout
     arg->fds = calloc(nfds, sizeof(struct pollfd));
     arg->nfds = nfds;
 
-    poll_item_t *arr = calloc(2, sizeof(poll_item_t));
+    poll_item_t arr[2];
     if (nfds < sizeof(arr) / sizeof(arr[0]) && !self->is_share_stack) {
         arg->poll_items = arr;
     } else {
@@ -288,7 +288,7 @@ int co_poll_inner(co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout
         arg->poll_items[i].poll = arg;
 
         arg->poll_items[i].pfn_prepare = on_poll_prepare_pfn;
-        struct epoll_event *ev = &arg->poll_items[i].st_event;
+        struct epoll_event *ev = &arg->poll_items[i].event;
 
         if(fds[i].fd > -1) {
             ev->data.ptr = arg->poll_items + i;
@@ -328,7 +328,7 @@ int co_poll_inner(co_epoll_t *ctx, struct pollfd fds[], nfds_t nfds, int timeout
     for(nfds_t i = 0; i < nfds; i++) {
         int fd = fds[i].fd;
         if(fd > -1) {
-            co_epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &arg->poll_items[i].st_event);
+            co_epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &arg->poll_items[i].event);
         }
         fds[i].revents = arg->fds[i].revents;
     }
@@ -396,7 +396,7 @@ static inline void join(timeout_item_link_t* ap_link, timeout_item_link_t *ap_ot
     ap_other->head = ap_other->tail = NULL;
 }
 
-static inline void take_all_timeout(st_timeout_t *ap_timeout, unsigned long long all_now, timeout_item_link_t *ap_result) {
+static inline void take_all_timeout(timeout_t *ap_timeout, unsigned long long all_now, timeout_item_link_t *ap_result) {
     if (ap_timeout->start == 0) {
         ap_timeout->start = all_now;
         ap_timeout->start_idx = 0;
@@ -490,7 +490,7 @@ void co_eventloop(co_epoll_t *ctx, pfn_co_eventloop_t pfn, void *arg) {
 
 co_epoll_t * alloc_epoll() {
     co_epoll_t *ctx = calloc(1, sizeof(co_epoll_t));
-    ctx->epoll_fd = 0;
+    ctx->epoll_fd = co_epoll_create(EPOLL_SIZE);
     ctx->timeout = alloc_timeout(60 * 1000);
     ctx->timeout_list = calloc(1, sizeof(timeout_item_link_t));
     ctx->active_list = calloc(1, sizeof(timeout_item_link_t));
@@ -498,13 +498,19 @@ co_epoll_t * alloc_epoll() {
 }
 
 void free_epoll(co_epoll_t *ctx) {
-
+    if(ctx) {
+        free(ctx->active_list);
+        free(ctx->timeout_list );
+        free_timeout(ctx->timeout);
+        co_epoll_res_free(ctx->result);
+    }
+    free(ctx);
 }
 
 co_routine_t *co_create_env(co_routine_env_t *env, const co_routine_attr_t *attr,
                                pfn_co_routine_t pfn, void *arg) {
     co_routine_attr_t at;
-    st_co_routine_attr_init(&at);
+    co_routine_attr_init(&at);
     if (attr) {
         memcpy(&at, attr, sizeof(at));
     }
@@ -831,6 +837,21 @@ struct co_cond_item_s *co_cond_pop(struct co_cond_s *link ) {
         pop_head_cond(link);
     }
     return p;
+}
+
+share_stack_t* co_alloc_sharestack(size_t count, size_t stack_size) {
+    share_stack_t* share_stack = malloc(sizeof(share_stack_t));
+    share_stack->alloc_idx = 0;
+    share_stack->stack_size = stack_size;
+
+    //alloc stack array
+    share_stack->count = count;
+    stack_mem_t** stack_array = calloc(count, sizeof(stack_mem_t*));
+    for (int i = 0; i < count; i++) {
+        stack_array[i] = co_alloc_stackmem(stack_size);
+    }
+    share_stack->stack_array = stack_array;
+    return share_stack;
 }
 
 

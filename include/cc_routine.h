@@ -15,7 +15,7 @@ struct co_routine_attr_s {
 };
 typedef struct co_routine_attr_s co_routine_attr_t;
 
-static inline void st_co_routine_attr_init(co_routine_attr_t *attr) {
+static inline void co_routine_attr_init(co_routine_attr_t *attr) {
     attr->stack_size = 128 * 1024;
     attr->share_stack = NULL;
 }
@@ -50,5 +50,9 @@ int co_cond_broadcast(struct co_cond_s *);
 int co_cond_timedwait(struct co_cond_s *,int timeout_ms);
 
 co_epoll_t *co_get_epoll_ct();
+
+share_stack_t* co_alloc_sharestack(size_t count, size_t iStackSize);
+
+void co_set_env_list(const char *name[],size_t cnt);
 
 #endif //LIBCOCO_CC_ROUTINE_H

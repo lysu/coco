@@ -657,7 +657,6 @@ static int co_sysenv_comp(const void *a, const void *b) {
 
 static struct co_sys_env_arr_s g_co_sysenv = {0};
 
-
 void co_set_env_list(const char *name[], size_t cnt) {
     if (g_co_sysenv.data) {
         return;

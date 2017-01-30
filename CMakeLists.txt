@@ -29,4 +29,17 @@ target_link_libraries(coco ${LINK_LIBS})
 add_executable(test_cond test/test_cond.c)
 target_link_libraries(test_cond coco)
 
+add_executable(test_copystack test/test_copystack.c)
+target_link_libraries(test_copystack coco)
 
+add_executable(test_setenv test/test_setenv.c)
+target_link_libraries(test_setenv coco)
+
+add_executable(test_thread test/test_thread.c)
+target_link_libraries(test_thread coco)
+
+add_executable(test_specific test/test_specific.c)
+target_link_libraries(test_specific coco)
+
+add_executable(test_poll test/test_poll.c)
+target_link_libraries(test_poll coco)
