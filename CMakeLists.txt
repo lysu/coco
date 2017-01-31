@@ -43,3 +43,6 @@ target_link_libraries(test_specific coco)
 
 add_executable(test_poll test/test_poll.c)
 target_link_libraries(test_poll coco)
+
+add_executable(test_echosrv test/test_echosrv.c)
+target_link_libraries(test_echosrv coco)
